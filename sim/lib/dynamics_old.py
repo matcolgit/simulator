@@ -1651,17 +1651,16 @@ class DiseaseModel(object):
         # contacts that happened on the last day
         new_contacts = new_df[['i','j','t','lambda']].to_records(index = False)
         
-        # if it's the first event, add fake observations and old contacts (if sib ranker)
+        # if it's the first event, add fake observations and old contacts
         # !! VALUES STILL HARDCODED !!
         if t_day == 5:
-            if hasattr(self.inference_algo, 'f'):
-                print('Adding fake obs and old contacts for first sib tracing event')
-                for day in range(5):
-                    for i in range(self.inference_algo.N):
-                        self.inference_algo.f.append_observation(i, -1, day)
-                    for ct in old_contacts:
-                        if ct[2] == day:
-                            self.inference_algo.f.append_contact(*ct)
+            print('Adding fake obs and old contacts for first sib tracing event')
+            for day in range(5):
+                for i in range(self.inference_algo.N):
+                    self.inference_algo.f.append_observation(i, -1, day)
+                for ct in old_contacts:
+                    if ct[2] == day:
+                        self.inference_algo.f.append_contact(*ct)
         else:
             # old_contacts should be empty if it's not the first event
             if len(old_contacts) != 0:
@@ -1686,7 +1685,7 @@ class DiseaseModel(object):
         max_length = np.max([self.smart_tracing_isolated_contacts, self.smart_tracing_tested_contacts])
         
         for indv in first_rank:
-            if len(indv_rank) > max_length:
+            if len(indv_rank > max_length):
                 break
             
             is_dead = self.state['dead'][indv]
@@ -1966,21 +1965,94 @@ class DiseaseModel(object):
                 
         print('len(valid_contacts):', len(valid_contacts))
         
-        dt_dict = {}
-        
-        print('Remove assertions if everything works')
+        # check if contacts are symmetric
+        t_to_unique = dict()
+        t_from_unique = dict()
         
         for h in valid_contacts:
-            # restrict contacts to window [t_start, t_end]
-            t_from = max(t_start, h.t_from)
-            t_to = min(t_end, h.t_to)
+            if h.indiv_i > h.indiv_j:
+                idxi = h.indiv_j
+                idxj = h.indiv_i
+            else:
+                idxi = h.indiv_i
+                idxj = h.indiv_j
+            link_from = (idxi, idxj, h.t_from, h.site) # check contacts with the same starting time
+            link_to = (idxi, idxj, h.t_to_direct, h.site) # check contacts with the same ending time
             
-            idxi = h.indiv_i
-            idxj = h.indiv_j
+            if link_from in t_to_unique:
+                if t_to_unique[link_from] != h.t_to_direct:
+                    print(idxi, idxj, h.t_from, "but", h.t_to_direct, "!=", t_to_unique[link_from])
+                t_to_unique[link_from] = max(t_to_unique[link_from], h.t_to_direct)
+            else:
+                t_to_unique[link_from] = h.t_to_direct
+            if link_to in t_from_unique:
+                if t_from_unique[link_to] != h.t_from:
+                    print(idxi, idxj, h.t_to_direct, "but", h.t_from, "!=", t_from_unique[link_to])
+                t_from_unique[link_to] = min(t_from_unique[link_to], h.t_from)
+            else:
+                t_from_unique[link_to] = h.t_from
+        
+        # collect contacts by site and match t_from and t_to
+        site_cont = dict()
+        for link in t_to_unique:
+            a = (link[0], link[1], link[3]) # (i,j,site)
+            if a in site_cont:
+                site_cont[a].append( (link[2], t_to_unique[link]) ) if (link[2], t_to_unique[link]) not in site_cont[a] \
+                else site_cont[a] 
+            else:
+                site_cont[a] = [(link[2], t_to_unique[link])] 
+
+        for link in t_from_unique:
+            a = (link[0], link[1], link[3]) # (i,j,site)
+            if a in site_cont:
+                site_cont[a].append( (t_from_unique[link] ,link[2]) ) if (t_from_unique[link] ,link[2]) not in site_cont[a] \
+                else site_cont[a]
+            else:
+                site_cont[a] = [(t_from_unique[link], link[2])]
+        
+        # drop all contacts with duration less than t_res independently on the day they occur (if flag True)
+        # !! STILL HARDCODED !!
+        first_filter = True
+        t_res = 0
+        
+        cont=[]
+        for link in site_cont:
+            all_times = site_cont[link]
+            for t in all_times:
+                # restrict contacts to window [t_start, t_end]
+                start = max(t_start, t[0])
+                end = min(t_end, t[1])
+                
+                if first_filter:
+                    if end-start > t_res:
+                        cont.append( (link[0], link[1], start, end, end-start, link[2], self.mob.site_type[link[2]]) )  
+                else:
+                    cont.append( (link[0], link[1], start, end, end-start, link[2], self.mob.site_type[link[2]]) )
+        
+        # build DataFrame
+        contact_raw = pd.DataFrame(data=cont, columns=['indiv_i', 'indiv_j', 't_from', 't_to', 'deltat','site','site_type'])
+        
+        print('len(contact_raw):', len(contact_raw))
+        
+        # filter them by duration
+        n_contacts = len(contact_raw)
+        indiv_i = contact_raw.indiv_i.to_numpy()
+        indiv_j = contact_raw.indiv_j.to_numpy()
+        t_from = contact_raw.t_from.to_numpy()
+        t_to = contact_raw.t_to.to_numpy()
+        dt = contact_raw.deltat.to_numpy()
+        sites = contact_raw.site.to_numpy()
+
+        # duration of all contacts, unique (i,j)
+        dt_dict = {}
+
+        for i in range(n_contacts):
+            #if i % 500000 == 0 :
+            #    print(round(i / n_contacts * 100, 2), "%")
             
             # !! VALUES STILL HARDCODED !!
-            day_start = int((t_from - 0.5 * TO_HOURS) // TO_HOURS)
-            day_end = int((t_to - 0.5 * TO_HOURS) // TO_HOURS)
+            day_start = int((t_from[i] - 0.5 * TO_HOURS) // TO_HOURS)
+            day_end = int((t_to[i] - 0.5 * TO_HOURS) // TO_HOURS)
             
             t_unit = int(1.0 * TO_HOURS)
             
@@ -1991,40 +2063,40 @@ class DiseaseModel(object):
             if day_end < 0:
                 day_end = 0
             
-            assert h.duration > 0.0
+            idxi = indiv_i[i]
+            idxj = indiv_j[i]
+            
+            assert(idxi < idxj)
             
             if day_start == day_end:
                 if (idxi, idxj, day_start) in dt_dict:
-                    dt_dict[(idxi, idxj, day_start)] += h.duration
+                    dt_dict[(idxi, idxj, day_start)] += dt[i]
                 else:
-                    dt_dict[(idxi, idxj, day_start)] = h.duration
+                    dt_dict[(idxi, idxj, day_start)] = dt[i]
             else:
                 # !! VALUES STILL HARDCODED !!
-                dt_initial = (0.5 * t_unit + (day_start + 1) * t_unit) - t_from
-                dt_final = t_to - (0.5 * t_unit + day_end * t_unit)
-                
-                assert dt_initial >= 0.0
-                assert dt_final >= 0.0
+                dt_initial = (0.5 * t_unit + (day_start + 1) * t_unit) - t_from[i]
+                dt_final = t_to[i] - (0.5 * t_unit + day_end * t_unit)
                 
                 # debug
                 if (day_end == 0):
+                    print('day_start:', day_start)
+                    print('day_end:', day_end)
                     raise ValueError('Contact ended on day 0 but starting day is not 0')               
                 if (dt_initial > t_unit and day_start != 0):
                     raise ValueError('Contact time is more than one day while pooling')
                 if (dt_final > t_unit and day_start != 0):
                     raise ValueError('Contact time is more than one day while pooling')
                 
-                if dt_initial > 0:
-                    if (idxi, idxj, day_start) in dt_dict:
-                        dt_dict[(idxi, idxj, day_start)] += dt_initial
-                    else:
-                        dt_dict[(idxi, idxj, day_start)] = dt_initial
+                if (idxi, idxj, day_start) in dt_dict:
+                    dt_dict[(idxi, idxj, day_start)] += dt_initial
+                else:
+                    dt_dict[(idxi, idxj, day_start)] = dt_initial
                 
-                if dt_final > 0:
-                    if (idxi, idxj, day_end) in dt_dict:
-                        dt_dict[(idxi, idxj, day_end)] += dt_final
-                    else:
-                        dt_dict[(idxi, idxj, day_end)] = dt_final
+                if (idxi, idxj, day_end) in dt_dict:
+                    dt_dict[(idxi, idxj, day_end)] += dt_final
+                else:
+                    dt_dict[(idxi, idxj, day_end)] = dt_final
                 
                 if day_end - day_start > 1:
                     for t in np.arange(day_start+1,day_end,1):
@@ -2032,36 +2104,16 @@ class DiseaseModel(object):
                             dt_dict[(idxi, idxj, t)] += t_unit
                         else:
                             dt_dict[(idxi, idxj, t)] = t_unit
-            
-        # filter + asymmetric/missing contacts
+
+        # filter and double them
         cont_sqzd_ls = []
-        first_filter = False
-        t_res = 0.0
-        miss = False
-        asym = False
+        for a in dt_dict:
+            if dt_dict[a] > t_res:
+                cont_sqzd_ls.append([a[1], a[0], a[2], dt_dict[a]])
+                cont_sqzd_ls.append([a[0], a[1], a[2], dt_dict[a]])
 
-        for (i,j,t) in dt_dict:
-            if first_filter:
-                if dt_dict[(i,j,t)] > t_res:
-                    cont_sqzd_ls.append([i, j, t, dt_dict[(i,j,t)]])
-                    if (j,i,t) not in dt_dict:
-                        miss = True
-                    else:
-                        if dt_dict[(i,j,t)] != dt_dict[(j,i,t)]:
-                            asym = True
-            else:
-                cont_sqzd_ls.append([i, j, t, dt_dict[(i,j,t)]])
-                if (j,i,t) not in dt_dict:
-                    miss = True
-                else:
-                    if dt_dict[(i,j,t)] != dt_dict[(j,i,t)]:
-                        asym = True
-
-        if miss:
-            print('Contact between i and j but no contact between j and i')
-        if asym:
-            print('Asymmetric contacts')
-
+        #print("Coarse-grained contacts", int(len(cont_sqzd_ls)/2))
+        
         return cont_sqzd_ls
         
     def __is_sib_tracing_contact_valid(self, *, contact):
